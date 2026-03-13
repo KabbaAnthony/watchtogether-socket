@@ -63,6 +63,8 @@ io.on('connection', (socket) => {
 
         if (isHost) {
             state.hostSocketId = socket.id;
+            // Always update videoId from the host so viewers get the right video
+            if (data.videoId) state.videoId = data.videoId;
         }
 
         // Send current room state back to the joining client.
