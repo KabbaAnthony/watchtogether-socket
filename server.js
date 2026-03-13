@@ -19,7 +19,8 @@ function getRoomState(roomCode) {
     if (!rooms[roomCode]) {
         rooms[roomCode] = {
             videoId:         null,
-            currentTime:     0,
+            currentTime:     0,     // playback position at the moment isPlaying last changed
+            playedAt:        null,  // Date.now() when play was pressed — used to drift-correct
             isPlaying:       false,
             playbackVersion: 1,
             hostSocketId:    null,
@@ -27,6 +28,14 @@ function getRoomState(roomCode) {
         };
     }
     return rooms[roomCode];
+}
+
+// Return the best-estimate current playback time for a room.
+// If the host is playing, add the seconds elapsed since they pressed play.
+function getLiveCurrentTime(state) {
+    if (!state.isPlaying || !state.playedAt) return state.currentTime;
+    const elapsed = (Date.now() - state.playedAt) / 1000;
+    return state.currentTime + elapsed;
 }
 
 function broadcastRoomCount(roomCode) {
@@ -41,7 +50,7 @@ function broadcastRoomCount(roomCode) {
 io.on('connection', (socket) => {
 
     socket.on('join-room', (data) => {
-        const { roomCode, userId, isHost, videoId, currentTime, isPlaying, playbackVersion } = data;
+        const { roomCode, userId, isHost } = data;
         if (!roomCode || !userId) return;
 
         socket.join(roomCode);
@@ -54,21 +63,17 @@ io.on('connection', (socket) => {
 
         if (isHost) {
             state.hostSocketId = socket.id;
-            if (videoId        !== undefined) state.videoId         = videoId;
-            if (currentTime    !== undefined) state.currentTime     = Number(currentTime);
-            if (isPlaying      !== undefined) state.isPlaying       = Boolean(isPlaying);
-            if (playbackVersion !== undefined) state.playbackVersion = Number(playbackVersion);
         }
 
-        // Send current room state back to whoever just joined
+        // Send current room state back to the joining client.
+        // currentTime is live-corrected if the host is mid-play.
         socket.emit('room-state', {
             videoId:         state.videoId,
-            currentTime:     state.currentTime,
+            currentTime:     getLiveCurrentTime(state),
             isPlaying:       state.isPlaying,
             playbackVersion: state.playbackVersion
         });
 
-        // Broadcast updated count to everyone in room
         broadcastRoomCount(roomCode);
     });
 
@@ -78,9 +83,12 @@ io.on('connection', (socket) => {
         if (!socket.data.isHost) return;
         const { roomCode, currentTime } = data;
         const state = getRoomState(roomCode);
+
         state.isPlaying    = true;
         state.currentTime  = Number(currentTime) || 0;
+        state.playedAt     = Date.now(); // record when play was pressed
         state.playbackVersion++;
+
         socket.to(roomCode).emit('viewer-play', {
             currentTime:     state.currentTime,
             playbackVersion: state.playbackVersion
@@ -91,9 +99,12 @@ io.on('connection', (socket) => {
         if (!socket.data.isHost) return;
         const { roomCode, currentTime } = data;
         const state = getRoomState(roomCode);
+
         state.isPlaying    = false;
         state.currentTime  = Number(currentTime) || 0;
+        state.playedAt     = null; // clear — no longer playing
         state.playbackVersion++;
+
         socket.to(roomCode).emit('viewer-pause', {
             currentTime:     state.currentTime,
             playbackVersion: state.playbackVersion
@@ -104,8 +115,12 @@ io.on('connection', (socket) => {
         if (!socket.data.isHost) return;
         const { roomCode, currentTime } = data;
         const state = getRoomState(roomCode);
+
         state.currentTime = Number(currentTime) || 0;
+        // If playing, reset the playedAt clock from the new position
+        if (state.isPlaying) state.playedAt = Date.now();
         state.playbackVersion++;
+
         socket.to(roomCode).emit('viewer-seek', {
             currentTime:     state.currentTime,
             playbackVersion: state.playbackVersion
@@ -116,10 +131,13 @@ io.on('connection', (socket) => {
         if (!socket.data.isHost) return;
         const { roomCode, videoId } = data;
         const state = getRoomState(roomCode);
+
         state.videoId         = videoId;
         state.currentTime     = 0;
+        state.playedAt        = null;
         state.isPlaying       = false;
         state.playbackVersion++;
+
         socket.to(roomCode).emit('viewer-change-video', {
             videoId:         state.videoId,
             playbackVersion: state.playbackVersion
@@ -140,7 +158,6 @@ io.on('connection', (socket) => {
             }
             broadcastRoomCount(roomCode);
 
-            // Clean up empty rooms
             if (state.members.size === 0) {
                 delete rooms[roomCode];
             }
